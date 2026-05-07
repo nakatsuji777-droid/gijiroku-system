@@ -1,0 +1,24 @@
+# 環境変数（APIキー）
+.env
+.streamlit/secrets.toml
+
+# Python仮想環境
+.venv/
+__pycache__/
+*.pyc
+
+# 入出力データ
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+
+# Whisperモデルキャッシュ
+models/
+
+# IDE
+.vscode/
+.idea/
+
+# ログ
+*.log

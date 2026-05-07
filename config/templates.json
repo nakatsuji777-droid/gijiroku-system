@@ -1,0 +1,38 @@
+{
+  "A": {
+    "name": "ニッケン建設 社内会議用",
+    "description": "定例会議・月次会議・全体会議・営業推進会議",
+    "file": "A_ニッケン社内会議.md",
+    "output_format": "markdown"
+  },
+  "B": {
+    "name": "SNS広報戦略会議用",
+    "description": "中辻良太・井上花音・ケオソテアラ・高橋李衣の4名会議",
+    "file": "B_SNS広報戦略会議.md",
+    "output_format": "markdown"
+  },
+  "C": {
+    "name": "他社会議用",
+    "description": "協力会社・取引先との打合せ",
+    "file": "C_他社会議.md",
+    "output_format": "markdown"
+  },
+  "D": {
+    "name": "JC神奈川ブロック コンプライアンス審査",
+    "description": "規則・財政審査会議（役員16名固定マスタ）",
+    "file": "D_JC神奈川ブロック.md",
+    "output_format": "plaintext"
+  },
+  "E": {
+    "name": "汎用議事録",
+    "description": "種別を問わない一般会議（やさしい日本語）",
+    "file": "E_汎用議事録.md",
+    "output_format": "markdown"
+  },
+  "F": {
+    "name": "工事会議用（3列表形式）",
+    "description": "現場分科会議・工事打合せ。発注者/設計監理/総合施工/設備業者の役割別＋3列表",
+    "file": "F_工事会議.md",
+    "output_format": "markdown"
+  }
+}
