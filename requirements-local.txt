@@ -1,0 +1,5 @@
+# ローカル環境用の完全な依存パッケージ
+# ローカルで使用する場合: pip install -r requirements-local.txt
+-r requirements.txt
+anthropic>=0.39.0
+faster-whisper>=1.0.0

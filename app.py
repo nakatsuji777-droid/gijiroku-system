@@ -1,5 +1,6 @@
 """議事録作成システム - Streamlit UI"""
 import os
+import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -16,6 +17,9 @@ try:
             os.environ[_key] = st.secrets[_key]
 except Exception:
     pass
+
+# ===== Cloud 環境判定 =====
+IS_CLOUD = os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("STREAMLIT_SERVER_ADDRESS") == "0.0.0.0"
 
 from src.config import ProjectConfig
 from src.minutes_archive import (
