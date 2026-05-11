@@ -32,9 +32,9 @@ class ProjectConfig:
 
         # 文字起こし速度プリセット
         # "fastest"  : 最速（音声2倍速・無音除去・lite主モデル）
-        # "balanced" : バランス（1.3倍速・無音除去・通常flash）← 推奨
-        # "quality"  : 品質最優先（等倍・前処理なし）
-        self.transcription_speed_preset = "balanced"
+        # "balanced" : バランス（1.3倍速・無音除去・通常flash）
+        # "quality"  : 品質最優先（等倍・前処理なし）← 推奨
+        self.transcription_speed_preset = "quality"
 
         # Whisperモデル設定（transcription_engine = "whisper" のとき使用）
         # tiny / base / small / medium / large-v3
@@ -50,9 +50,9 @@ class ProjectConfig:
 
         # ===== 議事録生成 品質プリセット =====
         # "fast"     : 一発生成・思考なし・gemini-2.5-flash（速度優先・無料枠節約）
-        # "balanced" : 二段階生成・軽い思考・gemini-2.5-flash（推奨・無料枠OK）
-        # "best"     : 二段階生成・深い思考・gemini-2.5-pro（最高品質・有料枠推奨）
-        self.minutes_quality_preset = "balanced"
+        # "balanced" : 二段階生成・軽い思考・gemini-2.5-flash（無料枠OK）
+        # "best"     : 二段階生成・深い思考・gemini-2.5-pro（最高品質・有料枠推奨）← 推奨
+        self.minutes_quality_preset = "best"
 
         # Gemini設定（generation_engine = "gemini" のとき使用）
         self.gemini_model = "models/gemini-2.5-flash"  # 高速・高品質・無料枠あり
