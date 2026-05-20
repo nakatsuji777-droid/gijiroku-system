@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: gijiroku-system
+    runtime: python
+    plan: free
+    buildCommand: apt-get install -y ffmpeg && pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --server.enableCORS false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GOOGLE_API_KEY
+        sync: false        # Renderダッシュボードで設定
+      - key: APP_PASSWORD
+        sync: false        # Renderダッシュボードで設定（ログイン用パスワード）
+      - key: ANTHROPIC_API_KEY
+        sync: false        # 任意：Claude APIを使う場合のみ

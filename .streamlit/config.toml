@@ -1,6 +1,13 @@
 [server]
 headless = true
-port = 8501
+# port = 8501  # ローカル用。Render では $PORT を使うためコメントアウト
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 200
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "dark"
+

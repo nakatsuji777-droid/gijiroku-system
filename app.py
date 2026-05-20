@@ -53,8 +53,45 @@ from src.transcriber import transcribe_audio, transcribe_audio_gemini
 # ===== ページ設定 =====
 st.set_page_config(
     page_title="議事録作成システム",
+    page_icon="📝",
     layout="wide",
 )
+
+
+# ===== パスワード認証（Render クラウド運用時） =====
+def _check_password() -> None:
+    """APP_PASSWORD 環境変数が設定されている場合のみログイン画面を表示する。"""
+    password = os.getenv("APP_PASSWORD", "").strip()
+    if not password:
+        return  # パスワード未設定（ローカル等）はスキップ
+
+    if st.session_state.get("authenticated"):
+        return  # 認証済みはスキップ
+
+    # --- ログイン画面 ---
+    st.markdown(
+        "<h2 style='text-align:center; padding-top:80px;'>📝 議事録作成システム</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<p style='text-align:center; color:#aaa;'>ニッケン建設 社内専用システム</p>",
+        unsafe_allow_html=True,
+    )
+    col = st.columns([1, 1, 1])[1]
+    with col:
+        with st.form("login_form"):
+            pw = st.text_input("🔑 パスワード", type="password", label_visibility="collapsed",
+                               placeholder="パスワードを入力")
+            if st.form_submit_button("ログイン", type="primary", use_container_width=True):
+                if pw == password:
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("パスワードが違います")
+    st.stop()
+
+
+_check_password()
 
 
 # ===== キャッシュ関数 =====
@@ -215,14 +252,14 @@ with tab_generate:
                 ),
                 horizontal=True,
                 format_func=lambda x: {
-                    "fastest": "🚀 最速（1.5倍速・30分チャンク）",
-                    "balanced": "⚖️ バランス（推奨・25分チャンク）",
-                    "quality": "🎯 高品質（等倍・20分チャンク）",
+                    "fastest": "🚀 最速（1.5倍速・30分区切り）",
+                    "balanced": "⚖️ バランス（推奨・25分区切り）",
+                    "quality": "🎯 高品質（等倍・20分区切り）",
                 }[x],
                 help=(
-                    "🚀 最速：1.5倍速＋無音除去＋30分チャンク。1時間音声を2リクエストで完了。\n\n"
-                    "⚖️ バランス：1.2倍速＋無音除去＋25分チャンク。速度と品質を両立（推奨）。\n\n"
-                    "🎯 高品質：等倍・前処理なし＋20分チャンク。最高品質。\n\n"
+                    "🚀 最速：1.5倍速＋無音除去＋30分区切り。1時間音声を2回で完了。\n\n"
+                    "⚖️ バランス：1.2倍速＋無音除去＋25分区切り。速度と品質を両立（推奨）。\n\n"
+                    "🎯 高品質：等倍・前処理なし＋20分区切り。最高品質。\n\n"
                     "※ Gemini無料枠（5 req/min）を尊重するため、内部でレート制限を自動管理。"
                     "短時間での連続実行は控えめにお願いします。"
                 ),
@@ -315,7 +352,7 @@ with tab_generate:
                         )
                     elif "文字起こしに失敗しました" in transcript:
                         st.warning(
-                            "一部のチャンクで文字起こしに失敗しました（結果内に "
+                            "一部の区間で文字起こしに失敗しました（結果内に "
                             "`[XX:XX〜XX:XX のセグメントは文字起こしに失敗…]` と表示されます）。"
                             "時間を置いてからもう一度実行するか、失敗箇所は手動で補完してください。"
                         )
@@ -672,19 +709,41 @@ with tab_generate:
                 template_content,
                 transcript=st.session_state.get("transcript", ""),
             )
-            volume_ratio = (
-                len(minutes) / max(len(st.session_state.get("transcript", "")), 1)
-            )
-            if validation.ok and not validation.warnings:
-                st.success(
-                    f"✅ 議事録を保存しました：{output_filename}　"
-                    f"（{validation.minutes_length:,}文字、文字起こし比率 {volume_ratio*100:.0f}%、必須セクション全部OK）"
-                )
+            transcript_text = st.session_state.get("transcript", "")
+            volume_ratio = len(minutes) / max(len(transcript_text), 1)
+
+            # 品質スコアカード
+            q_cols = st.columns(3)
+            with q_cols[0]:
+                ratio_pct = int(volume_ratio * 100)
+                if ratio_pct >= 70:
+                    st.metric("📊 文字起こし保持率", f"{ratio_pct}%", "良好")
+                elif ratio_pct >= 45:
+                    st.metric("📊 文字起こし保持率", f"{ratio_pct}%", "やや低め")
+                else:
+                    st.metric("📊 文字起こし保持率", f"{ratio_pct}%", "⚠️ 要確認")
+            with q_cols[1]:
+                st.metric("📝 議事録文字数", f"{validation.minutes_length:,} 文字")
+            with q_cols[2]:
+                section_status = "✅ 全セクションOK" if validation.ok else f"⚠️ 欠落あり"
+                st.metric("📋 必須セクション", section_status)
+
+            if validation.ok and not validation.warnings and volume_ratio >= 0.5:
+                st.success(f"✅ 議事録を保存しました：{output_filename}")
             else:
-                st.success(
-                    f"議事録を保存しました：{output_filename}（{validation.minutes_length:,}文字、"
-                    f"文字起こし比率 {volume_ratio*100:.0f}%）"
-                )
+                st.success(f"議事録を保存しました：{output_filename}")
+                if volume_ratio < 0.2:
+                    st.error(
+                        f"🚨 **品質警告：文字起こし保持率が {volume_ratio*100:.0f}% と極端に低いです。**\n\n"
+                        "AIが要約モードで動作した可能性があります。\n"
+                        "**「議事録を生成」をもう一度押して再生成してください。**\n"
+                        "（同じ入力でも結果が変わることがあります）"
+                    )
+                elif volume_ratio < 0.45:
+                    st.warning(
+                        f"⚠️ 文字起こし保持率が {volume_ratio*100:.0f}% とやや低めです。\n"
+                        "重要な発言が省略されている可能性があります。内容をご確認ください。"
+                    )
                 if validation.missing_sections:
                     st.warning(
                         "⚠️ 以下の必須セクションが見つかりませんでした："
@@ -696,7 +755,23 @@ with tab_generate:
         except (ValueError, RuntimeError) as e:
             status_placeholder.empty()
             _gen_error = f"{type(e).__name__}: {str(e)[:300]}"
-            st.error(str(e))
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                st.error(
+                    "**Gemini APIの無料枠（毎分5リクエスト・1日20リクエスト）を超過しました。**\n\n"
+                    "▶ **1〜2分待ってから「議事録を生成」を再クリック**してください。\n"
+                    "▶ `⚖️ バランス` プリセット（gemini-2.5-flash）に切り替えると枠を節約できます。\n"
+                    "▶ Pro モデルは1日の無料枠が少ないため、有料APIキーの取得も検討してください。"
+                )
+            elif "全モデルで失敗" in err_str:
+                st.error(
+                    "**すべてのAIモデルでエラーが発生しました。**\n\n"
+                    "▶ APIキーが有効か確認してください。\n"
+                    "▶ しばらく待ってから再試行してください。\n\n"
+                    f"詳細: {err_str[:200]}"
+                )
+            else:
+                st.error(err_str)
         except Exception as e:
             status_placeholder.empty()
             _gen_error = f"{type(e).__name__}: {str(e)[:300]}"

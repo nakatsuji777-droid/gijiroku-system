@@ -1,12 +1,11 @@
-"""議事録生成モジュール（100%版：二段階生成 + thinking + 検証 + 自動リトライ）
+"""議事録生成モジュール（Ver2.1: 段階間バリデーション + フォールバック改善 + プロンプト強化）
 
-設計:
-- QUALITY_PRESETS で 速度/バランス/最高品質 を切替
-- balanced 以上では「① 構造化抽出 → ② テンプレート整形」の二段階生成
-- gemini-2.5-pro / -flash の thinking モードを品質に応じて活用
-- 生成結果の必須セクション欠落を検知して最大2回まで自動リトライ
-- 過去の議事録をコンテキストとして注入できる
-- Gemini / Claude / Ollama の3エンジンに対応
+改善内容:
+- Step1 出力が文字起こしの 50% 未満なら強化プロンプトで再抽出
+- Step2 出力が Step1 の 65% 未満なら強化プロンプトで再整形
+- フォールバックモデル使用時は thinking_budget を自動スケール
+- 抽出プロンプト冒頭に文字数最低基準を明示
+- 整形プロンプトに圧縮禁止の数値ルールを追加
 """
 from __future__ import annotations
 
@@ -37,6 +36,17 @@ if not logger.handlers:
 
 
 # ===========================================================================
+# ステップ間バリデーション閾値
+# ===========================================================================
+
+# Step1（構造化抽出）: transcript の何%以上の文字数が必要か
+_STEP1_MIN_RATIO = 0.45
+
+# Step2（整形）: Step1 出力の何%以上が必要か
+_STEP2_MIN_RATIO = 0.65
+
+
+# ===========================================================================
 # 品質プリセット
 # ===========================================================================
 
@@ -45,25 +55,25 @@ QUALITY_PRESETS: dict[str, dict] = {
         "label": "⚡ 高速",
         "model": "models/gemini-2.5-flash",
         "two_stage": False,
-        "thinking_budget": 0,        # 思考なし（速度優先）
+        "thinking_budget": 0,
         "temperature": 0.2,
         "max_output_tokens": 32768,
-        "validate_retries": 0,        # 自動リトライなし
+        "validate_retries": 0,
     },
     "balanced": {
         "label": "⚖️ バランス（推奨）",
         "model": "models/gemini-2.5-flash",
-        "two_stage": True,            # 二段階生成
-        "thinking_budget": 4096,      # 軽い思考
+        "two_stage": True,
+        "thinking_budget": 4096,
         "temperature": 0.3,
-        "max_output_tokens": 32768,
+        "max_output_tokens": 65536,
         "validate_retries": 1,
     },
     "best": {
         "label": "🎯 最高品質（Pro）",
         "model": "models/gemini-2.5-pro",
         "two_stage": True,
-        "thinking_budget": 16384,     # 深い思考
+        "thinking_budget": 16384,
         "temperature": 0.3,
         "max_output_tokens": 65536,
         "validate_retries": 2,
@@ -74,13 +84,10 @@ DEFAULT_QUALITY = "balanced"
 
 
 # ===========================================================================
-# 既定の固有名詞辞書（プロジェクトに合わせてカスタマイズ可）
-# 文字起こしの誤変換を「正しい表記」に強制統一するためのプロジェクト共通辞書。
-# ユーザーが UI から追加した辞書が、これに上書きで結合される。
+# 既定の固有名詞辞書
 # ===========================================================================
 
 DEFAULT_GLOSSARY: list[tuple[str, list[str]]] = [
-    # (正しい表記, 音声認識で発生しうる誤りの例)
     ("ニッケン建設", ["日建建設", "日建", "ニッケンケンセツ", "ニッケンケン設", "二建建設"]),
     ("中辻良太", ["中津井", "中辻 良太", "ナカツジリョウタ", "中津井良太", "中辻さん"]),
     ("横澤代表", ["横沢代表", "ヨコザワ代表"]),
@@ -99,10 +106,6 @@ DEFAULT_GLOSSARY: list[tuple[str, list[str]]] = [
 
 
 def render_glossary_for_prompt(custom_glossary_text: str = "") -> str:
-    """
-    プロンプトに埋め込む辞書セクションを組み立てる。
-    custom_glossary_text はユーザーがUIから入力したフリーフォーマット辞書。
-    """
     lines: list[str] = []
     for correct, wrongs in DEFAULT_GLOSSARY:
         if wrongs:
@@ -117,10 +120,22 @@ def render_glossary_for_prompt(custom_glossary_text: str = "") -> str:
 
 
 # ===========================================================================
-# 構造化抽出プロンプト（二段階生成の Step 1）
+# 構造化抽出プロンプト（Step 1）
 # ===========================================================================
 
-EXTRACTION_PROMPT = """あなたは会議の専属速記者です。
+EXTRACTION_PROMPT = """【最初に必ず確認：出力文字数の最低基準】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+入力「文字起こしデータ」の文字数を X とすると：
+  ✅ あなたの出力は X × 0.8 以上（目標: X × 0.9）
+  ❌ X × 0.5 未満の出力 → 作業失敗・再実行
+
+具体例：X = 20,000文字 → 出力は最低 16,000文字
+
+【途中で「長すぎる」と感じても絶対に省略しない】
+省略したくなったら「まだ書いていない発言はないか？」と自問してください。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+あなたは会議の専属速記者です。
 あなたの仕事は「文字起こしの内容を圧縮せず、整理されたメモに書き起こす」ことです。
 **要約担当ではありません。** ジャーナリストが取材ノートを書き起こす感覚で、すべての発言を保持してください。
 
@@ -131,6 +146,8 @@ EXTRACTION_PROMPT = """あなたは会議の専属速記者です。
    - 文字起こしの文字数を A、抽出結果の文字数を B とすると、**B ≧ 0.8 × A** を目指してください。
    - 議論のニュアンス・条件交渉・補足説明・根拠・例え話・数値・固有名詞は一切省略しない。
    - 「短くまとめる」「要するに」「つまり」と書きたくなったら**それは違反**。元の発言をそのまま書き起こす。
+   - **各発言者の発言は、元の文字起こしとほぼ同じ長さで書き起こすこと。**
+   - **箇条書きにまとめる場合でも、情報の削除は禁止。**
 
 2. **音声認識の誤変換を必ず修正**
    - 文字起こしには誤変換が含まれます。文脈から判断して**自動的に正しい固有名詞へ修正**してください。
@@ -139,7 +156,6 @@ EXTRACTION_PROMPT = """あなたは会議の専属速記者です。
 {custom_glossary}
 
    - 補足情報・参考過去議事録に出てくる人名・会社名・案件名は、すべて正しい表記に統一すること。
-   - 例：「日建建設」→「ニッケン建設」、「中津井さん」→「中辻良太」（または「中辻さん」）
 
 3. **発言者の同定**
    - 文字起こしで発言者ラベルが空（「話者A」など）でも、**話題と文脈から発言者を推定**してください。
@@ -147,17 +163,14 @@ EXTRACTION_PROMPT = """あなたは会議の専属速記者です。
    - どうしても判断できない場合のみ `[発言者不明]` と記載。捏造は禁止。
 
 4. **相槌・フィラーは徹底的に削除**（重要）
-   - 議事録は読み物です。相槌・つなぎ言葉は**1つ残らず削除**してください。
    - 削除対象（例）：
      * 純粋な相槌：「はい」「ええ」「うん」「うんうん」「なるほど」「なるほどなるほど」「そうそう」「ふんふん」
      * 同意の繰り返し：「そうですね」「ですね」「ええ、ええ」「あー、はい」「はい、はい」
      * 言い淀み・フィラー：「えー」「あー」「あのー」「えーっと」「うーん」「まあ」「まー」「ま」「えっと」「そのー」「なんか」「ちょっと」（独立した語として）
      * 言い直しの前部分：「あれが…いや、これが」→「これが」のみ残す
-   - **削除しないもの（意味のある発言）**：
+   - **削除しないもの**：
      * 意思表示：「分かりました」「了解しました」「承知しました」「同意します」
      * 明確な否定：「いえ」「違います」「いいえ」（反対意見として）
-     * 質問への明確な回答としての「はい」「いいえ」（文脈から内容のある回答だと判断できる場合）
-   - 議事録に書くべきは **「中身のある発言」のみ**。「あー、なるほど、はい、ええ、そうですね…」のような連続相槌は議論として記録しない。
 
 ────────────────────────────
 【抽出すべき要素】
@@ -216,8 +229,7 @@ EXTRACTION_PROMPT = """あなたは会議の専属速記者です。
 - **要約しない**。短くしようとしない。**文字起こしの 80% 以上の文字量**を保つ。
 - **誤変換は必ず修正**（特に上記カスタム辞書の語）。不明な発言者・名前は捏造せず `[発言者不明]`。
 - **数値・金額・期日・固有名詞は1つも省略しない**。
-- **相槌・フィラー（「はい」「ええ」「うん」「なるほど」「そうですね」「あー」「えー」「あのー」「まあ」など）は徹底的に削除**。意味のある発言のみ残す。
-- 議論内容は残す。相槌は残さない。この2つを混同しない。
+- **相槌・フィラーは徹底的に削除**。意味のある発言のみ残す。
 - 出力は上記の構造化テキストのみ。前置き・後書き禁止。
 
 【補足情報（ユーザー入力）】
@@ -238,36 +250,39 @@ FORMATTING_PROMPT_HEADER = """あなたは社内議事録の整形担当です�
 ────────────────────────────
 【最重要・絶対厳守】
 ────────────────────────────
-1. **要約しない・圧縮しない**
-   - 入力された構造化情報の**情報量・文字数を維持**してください。
-   - 整形時に発言を短くしたり、複数の発言を1行にまとめたりしない。
-   - 「整形 = 見出しを変えて並び替えるだけ」と理解する。**内容は1文字も削らない**。
+1. **要約しない・圧縮しない（数値基準）**
+   - 入力「構造化抽出済み情報」の文字数を Y とする
+   - **あなたの出力は Y × 0.85 以上**でなければならない
+   - 例：Y = 15,000文字 → 出力は最低 12,750文字
+   - 整形時に発言を短くしたり、複数の発言を1行にまとめたりしない
+   - **「整形 = 見出しを変えて並び替えるだけ」** であり、内容は一切削らない
 
-2. **誤変換の修正を維持**
+2. **箇条書きを統合・削減しない**
+   - 入力に5つの箇条書きがあれば、出力も5つの箇条書きで出力する
+   - 「・A ・B ・C」を「・A、B、C」のように1行にまとめることは禁止
+   - 各発言の詳細説明・背景・数値は1つも省略しない
+
+3. **誤変換の修正を維持**
    - 構造化情報で正しく修正されている固有名詞（例：ニッケン建設、中辻良太）を、整形時に元の誤変換に戻さない。
-   - 同じ人物名・会社名は議事録全体で統一する。
 
-3. **テンプレートの指定を厳守**
+4. **テンプレートの指定を厳守**
    - テンプレートが指定する見出し階層・番号・記号・トーン（です・ます調 / である調）を完全に守る。
    - テンプレートに含まれる Few-shot 例の体裁を真似る。
 
-4. **捏造禁止**
+5. **捏造禁止**
    - 構造化情報に含まれていない事実は書かない。
    - 不明箇所は `[不明]` と明記。
 
-5. **テンプレート内のプレースホルダ表記は出力しない**
-   - テンプレート文字列に含まれる `{metadata}`、`{transcript}`、`{reference_minutes}` などはテンプレートの記法。
-   - 実際の議事録には**含めず**、その位置に該当する内容を埋め込む。
+6. **テンプレート内のプレースホルダ表記は出力しない**
+   - `{metadata}`、`{transcript}`、`{reference_minutes}` などは実際の内容に置換済みなので、そのまま出力しない。
 
-6. **前置き・後書き禁止**
+7. **前置き・後書き禁止**
    - 「以下が議事録です」「以上です」のような文言を絶対に書かない。
    - 出力は議事録本文のみ。
 
-7. **相槌・フィラーは徹底的に削除（再混入禁止）**
-   - 構造化情報から議事録に整形する過程で、**相槌・フィラーを再び復活させない**でください。
+8. **相槌・フィラーは徹底的に削除（再混入禁止）**
    - 削除すべき語：「はい」「ええ」「うん」「うんうん」「なるほど」「なるほどなるほど」「そうそう」「ふんふん」「そうですね」「ですね」「あー」「えー」「あのー」「えーっと」「うーん」「まあ」「まー」「ま」「えっと」「そのー」「ちょっと」（独立した語として）
    - 万一、構造化情報に相槌が残っていた場合は、整形時に **徹底的に削除** してください。
-   - 議事録は「中身のある発言と決定事項のみ」を記載する読み物です。
 
 【テンプレート（指定フォーマット）】
 {template}
@@ -279,13 +294,14 @@ FORMATTING_PROMPT_HEADER = """あなたは社内議事録の整形担当です�
 {metadata}
 
 ────────────────────────────
-【最終確認】
+【最終確認（整形完了前に必ずチェック）】
 ────────────────────────────
-- テンプレートの見出し構造を厳守
-- **議論詳細は構造化情報の文字量をそのまま維持**（短くしない）
-- 決定事項は箇条書きで、担当・期限が明確になるよう記載
-- 固有名詞は構造化情報の修正済み表記に統一
-- 出力は議事録本文のみ
+□ 出力文字数は入力（構造化情報）の85%以上か？
+□ テンプレートの見出し構造を厳守しているか？
+□ 議論詳細は構造化情報の文字量をそのまま維持しているか（短くしていないか）？
+□ 決定事項は箇条書きで、担当・期限が明確か？
+□ 固有名詞は構造化情報の修正済み表記に統一されているか？
+□ 出力は議事録本文のみか（前置き・後書きなしか）？
 """
 
 
@@ -302,7 +318,6 @@ class ValidationResult:
 
 
 _REQUIRED_HINTS = [
-    # よく使われる必須セクション名のキーワード（部分一致）
     ["基本情報", "会議概要", "概要"],
     ["議論", "議事", "本件", "内容", "話し合い"],
     ["決定", "結論", "決まった", "Action", "アクション", "次に", "ToDo"],
@@ -313,15 +328,8 @@ def validate_minutes(
     minutes: str,
     template: str = "",
     transcript: str = "",
-    min_volume_ratio: float = 0.6,
+    min_volume_ratio: float = 0.5,
 ) -> ValidationResult:
-    """
-    生成された議事録に必須セクションが揃っているか検査する。
-    ・3つの必須カテゴリ（概要/議論/決定）が一つでも欠けていれば NG
-    ・極端に短い（500文字未満）なら警告
-    ・transcript が渡されていれば「議事録/文字起こし の比率」をチェックし、
-      min_volume_ratio 未満なら警告（要約しすぎの検知）
-    """
     missing: list[str] = []
     warnings: list[str] = []
 
@@ -335,7 +343,6 @@ def validate_minutes(
             "文字起こしが薄いか、生成が打ち切られた可能性。"
         )
 
-    # 分量比率チェック（要約しすぎ検知）
     if transcript and len(transcript) > 1000:
         ratio = len(minutes) / len(transcript)
         if ratio < min_volume_ratio:
@@ -366,21 +373,18 @@ def _call_gemini(
     max_output_tokens: int,
     thinking_budget: int = 0,
 ) -> str:
-    """Gemini API を 1 回呼び出す。thinking_budget>0 で内部思考有効。"""
     from google.genai import types
 
     cfg_kwargs = {
         "temperature": temperature,
         "max_output_tokens": max_output_tokens,
     }
-    # thinking モード（gemini-2.5系のみ。0は無効、>0で予算指定）
     if thinking_budget and thinking_budget > 0:
         try:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_budget=thinking_budget
             )
         except (AttributeError, TypeError):
-            # 古いSDK版で ThinkingConfig がない場合は黙って無効化
             pass
 
     response = client.models.generate_content(
@@ -402,32 +406,45 @@ def _call_gemini_with_fallback(
     progress_callback=None,
     label: str = "",
 ) -> str:
-    """503/429 のときは別モデルへフォールバックする。"""
+    """503/429 のときは別モデルへフォールバックする。
+    フォールバック時は thinking_budget を自動スケールダウンして品質劣化を最小化する。
+    """
     fallback = [
         primary_model,
-        "models/gemini-flash-latest",
         "models/gemini-2.5-flash",
+        "models/gemini-flash-latest",
     ]
-    seen = set()
-    fallback = [m for m in fallback if not (m in seen or seen.add(m))]
+    seen: set[str] = set()
+    fallback = [m for m in fallback if not (m in seen or seen.add(m))]  # type: ignore[func-returns-value]
 
     last_err: Optional[Exception] = None
     for i, model in enumerate(fallback):
+        # フォールバックモデルでは thinking_budget を段階的に下げる
+        if i == 0:
+            effective_thinking = thinking_budget
+        elif i == 1:
+            effective_thinking = min(thinking_budget, 4096)
+        else:
+            effective_thinking = 0  # 3段目以降は thinking 無効
+
         if progress_callback:
+            fallback_note = f"（フォールバック {i}）" if i > 0 else ""
             progress_callback(
-                f"{label} {model.replace('models/', '')} で生成中…"
-                + (f"（フォールバック {i}）" if i > 0 else "")
+                f"{label} {model.replace('models/', '')} で生成中…{fallback_note}"
             )
         for attempt in range(2):
             try:
-                logger.info(f"{label} {model} attempt={attempt+1} thinking={thinking_budget}")
+                logger.info(
+                    f"{label} {model} attempt={attempt+1} "
+                    f"thinking={effective_thinking} (original={thinking_budget})"
+                )
                 text = _call_gemini(
                     client=client,
                     model=model,
                     prompt=prompt,
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
-                    thinking_budget=thinking_budget,
+                    thinking_budget=effective_thinking,
                 )
                 if text.strip():
                     return text
@@ -437,7 +454,6 @@ def _call_gemini_with_fallback(
                 err_str = str(e)
                 logger.warning(f"{label} {model} 失敗: {type(e).__name__}: {err_str[:200]}")
                 if "429" in err_str:
-                    # 当該モデル枯渇 → 即フォールバック
                     break
                 if "503" in err_str and attempt == 0:
                     if progress_callback:
@@ -469,16 +485,6 @@ def generate_minutes_gemini(
     custom_glossary: str = "",
     project_names: str = "",
 ) -> str:
-    """
-    Gemini API で議事録を生成する（100%版）。
-
-    quality_preset:
-      - "fast"     : 一発生成・思考なし・gemini-2.5-flash
-      - "balanced" : 二段階生成・軽い思考・gemini-2.5-flash（推奨）
-      - "best"     : 二段階生成・深い思考・gemini-2.5-pro
-
-    reference_minutes: 過去議事録のテキストを渡すと、用語統一・継続課題のフォローに使う
-    """
     from google import genai
 
     api_key = os.getenv("GOOGLE_API_KEY", "").strip()
@@ -497,7 +503,6 @@ def generate_minutes_gemini(
     two_stage = preset["two_stage"]
     validate_retries = preset["validate_retries"]
 
-    # ユーザーが明示的に model を渡した場合（旧APIとの互換）はそれを優先
     if model and model != "models/gemini-2.5-flash":
         primary_model = model
 
@@ -513,7 +518,6 @@ def generate_minutes_gemini(
 
     client = genai.Client(api_key=api_key)
 
-    # 自動リトライ付きで生成
     last_minutes = ""
     last_validation: Optional[ValidationResult] = None
     for attempt in range(validate_retries + 1):
@@ -569,7 +573,7 @@ def generate_minutes_gemini(
 
 
 # ===========================================================================
-# 二段階生成
+# 二段階生成（ステップ間バリデーション付き）
 # ===========================================================================
 
 def _generate_two_stage(
@@ -586,9 +590,11 @@ def _generate_two_stage(
     custom_glossary: str = "",
 ) -> str:
     """
-    Step 1: 文字起こしから「構造化抽出テキスト」を生成
-    Step 2: 構造化テキスト + テンプレートから「整形済み議事録」を生成
+    Step 1: 構造化抽出 → Step 2: テンプレート整形
+    各ステップ後に文字数比率をチェックし、不足なら強化プロンプトで1回再試行する。
     """
+    transcript_len = len(transcript)
+
     # === Step 1: 構造化抽出 ===
     if progress_callback:
         progress_callback("Step 1/2: 議題・発言・決定事項を構造化抽出中…")
@@ -609,7 +615,40 @@ def _generate_two_stage(
         progress_callback=progress_callback,
         label="[Step 1/2 抽出]",
     )
-    logger.info(f"Step1 抽出結果: {len(structured)}文字")
+    step1_ratio = len(structured) / max(transcript_len, 1)
+    logger.info(f"Step1 抽出結果: {len(structured)}文字 / transcript: {transcript_len}文字 = {step1_ratio:.1%}")
+
+    # --- Step 1 バリデーション: 比率が低すぎる場合は再抽出 ---
+    if step1_ratio < _STEP1_MIN_RATIO:
+        logger.warning(
+            f"Step1 出力が不十分（{step1_ratio:.1%} < {_STEP1_MIN_RATIO:.0%}）。"
+            f"強化プロンプトで再抽出します。"
+        )
+        if progress_callback:
+            progress_callback(
+                f"⚠️ Step 1 の抽出量が不足（{step1_ratio:.0%}）。"
+                f"強化プロンプトで再抽出中…"
+            )
+        min_chars = int(transcript_len * 0.8)
+        retry_prefix = (
+            f"【緊急追加指示】\n"
+            f"前回の抽出結果が文字起こし（{transcript_len}文字）のわずか {step1_ratio:.0%} しかありませんでした。\n"
+            f"これは失格です。文字起こし全体を読み直し、**最低 {min_chars} 文字**の抽出結果を出力してください。\n"
+            f"省略・要約は一切禁止です。すべての発言・議論・数値・固有名詞を書き起こしてください。\n\n"
+        )
+        structured = _call_gemini_with_fallback(
+            client=client,
+            primary_model=primary_model,
+            prompt=retry_prefix + extraction_prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            thinking_budget=thinking_budget,
+            progress_callback=progress_callback,
+            label="[Step 1/2 再抽出]",
+        )
+        logger.info(f"Step1 再抽出結果: {len(structured)}文字 ({len(structured)/max(transcript_len,1):.1%})")
+
+    step1_len = len(structured)
 
     # === Step 2: テンプレート整形 ===
     if progress_callback:
@@ -624,12 +663,46 @@ def _generate_two_stage(
         client=client,
         primary_model=primary_model,
         prompt=formatting_prompt,
-        temperature=max(temperature - 0.1, 0.0),  # 整形はより決定論的に
+        temperature=max(temperature - 0.1, 0.0),
         max_output_tokens=max_tokens,
-        thinking_budget=max(thinking_budget // 2, 0),  # 整形は思考少なめ
+        thinking_budget=max(thinking_budget // 2, 0),
         progress_callback=progress_callback,
         label="[Step 2/2 整形]",
     )
+    step2_ratio = len(minutes) / max(step1_len, 1)
+    logger.info(f"Step2 整形結果: {len(minutes)}文字 / Step1: {step1_len}文字 = {step2_ratio:.1%}")
+
+    # --- Step 2 バリデーション: 圧縮しすぎなら再整形 ---
+    if step2_ratio < _STEP2_MIN_RATIO:
+        logger.warning(
+            f"Step2 整形で情報が圧縮されすぎ（{step2_ratio:.1%} < {_STEP2_MIN_RATIO:.0%}）。"
+            f"強化プロンプトで再整形します。"
+        )
+        if progress_callback:
+            progress_callback(
+                f"⚠️ Step 2 の出力が圧縮されすぎ（{step2_ratio:.0%}）。"
+                f"強化プロンプトで再整形中…"
+            )
+        min_chars = int(step1_len * 0.8)
+        retry_prefix = (
+            f"【緊急追加指示】\n"
+            f"前回の整形結果（{len(minutes)}文字）が構造化情報（{step1_len}文字）の"
+            f"{step2_ratio:.0%} しかありませんでした。情報が大量に失われています。\n"
+            f"**最低 {min_chars} 文字**の議事録を出力してください。\n"
+            f"各議題の箇条書き項目を省略・統合せず、すべてをテンプレートに落とし込んでください。\n\n"
+        )
+        minutes = _call_gemini_with_fallback(
+            client=client,
+            primary_model=primary_model,
+            prompt=retry_prefix + formatting_prompt,
+            temperature=max(temperature - 0.1, 0.0),
+            max_output_tokens=max_tokens,
+            thinking_budget=max(thinking_budget // 2, 0),
+            progress_callback=progress_callback,
+            label="[Step 2/2 再整形]",
+        )
+        logger.info(f"Step2 再整形結果: {len(minutes)}文字 ({len(minutes)/max(step1_len,1):.1%})")
+
     return minutes
 
 
@@ -653,7 +726,6 @@ def _generate_single_stage(
     custom_glossary: str = "",
     project_names: str = "",
 ) -> str:
-    """既存テンプレートをそのまま使った1ステップ生成。"""
     prompt = fill_template(
         template=template,
         transcript=transcript,
@@ -662,10 +734,8 @@ def _generate_single_stage(
         attendees=attendees,
         project_names=project_names,
     )
-    # 過去議事録があれば末尾付近に挿入
     if reference_block.strip() and "{reference_minutes}" not in template:
         prompt += "\n\n# 参考: 前回までの議事録\n" + reference_block
-    # カスタム辞書を最重要ルールとして冒頭付近に注入
     glossary_block = render_glossary_for_prompt(custom_glossary)
     prompt = (
         "【最重要・固有名詞辞書】文字起こしの誤変換は以下を参考に必ず修正してください。\n"
@@ -721,12 +791,10 @@ def _build_metadata_block(
 
 
 def _build_reference_block(reference_minutes: Optional[list[str]]) -> str:
-    """過去議事録を参考情報として整形する。"""
     if not reference_minutes:
         return "（参考過去議事録なし）"
     parts = []
     for i, ref in enumerate(reference_minutes[:3], start=1):
-        # 長すぎる過去議事録は先頭3000文字に絞る
         truncated = ref[:3000] + ("\n…（以下省略）…" if len(ref) > 3000 else "")
         parts.append(f"【参考{i}】\n{truncated}")
     return "\n\n".join(parts)
@@ -738,11 +806,6 @@ def _safe_render_extraction(
     reference: str,
     custom_glossary: str = "",
 ) -> str:
-    """
-    EXTRACTION_PROMPT のプレースホルダを replace で安全に置換する。
-    str.format() を使うと、transcript 等に含まれる「{xxx}」が format 引数として
-    解釈されて KeyError になるため使用しない。
-    """
     glossary_block = render_glossary_for_prompt(custom_glossary)
     return (
         EXTRACTION_PROMPT
@@ -754,10 +817,6 @@ def _safe_render_extraction(
 
 
 def _safe_render_formatting(template: str, structured: str, metadata: str) -> str:
-    """
-    FORMATTING_PROMPT_HEADER のプレースホルダを replace で安全に置換する。
-    template の中に含まれる「{transcript}」「{metadata}」を format() に解釈させない。
-    """
     return (
         FORMATTING_PROMPT_HEADER
         .replace("{template}", template)
@@ -780,7 +839,6 @@ def generate_minutes_ollama(
     base_url: str = "http://localhost:11434",
     num_predict: int = 8000,
 ) -> str:
-    """Ollama（ローカルLLM）を使って議事録を生成する。APIキー不要。"""
     prompt = fill_template(
         template=template,
         transcript=transcript,
@@ -818,7 +876,6 @@ def generate_minutes_ollama(
 
 
 def is_ollama_running(base_url: str = "http://localhost:11434") -> bool:
-    """Ollama サービスが起動中かチェックする。"""
     try:
         r = requests.get(f"{base_url}/api/tags", timeout=2)
         return r.status_code == 200
@@ -836,20 +893,14 @@ def generate_minutes(
     meeting_date: str = "",
     meeting_location: str = "",
     attendees: str = "",
-    model: str = "claude-opus-4-6",
-    max_tokens: int = 16000,
+    model: str = "claude-sonnet-4-6",
+    max_tokens: int = 32000,
     quality_preset: str = DEFAULT_QUALITY,
     reference_minutes: Optional[list[str]] = None,
     custom_glossary: str = "",
     project_names: str = "",
 ) -> str:
-    """Claude API を使って議事録を生成する。
-
-    quality_preset:
-      - "fast"     : 一発生成
-      - "balanced" : 二段階生成
-      - "best"     : 二段階生成 + 詳細プロンプト
-    """
+    """Claude API を使って議事録を生成する（二段階生成 + ステップ間バリデーション付き）。"""
     from anthropic import Anthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -888,7 +939,6 @@ def generate_minutes(
         )
         if reference_block.strip():
             prompt += "\n\n# 参考: 前回までの議事録\n" + reference_block
-        # カスタム辞書を冒頭付近に注入
         glossary_block = render_glossary_for_prompt(custom_glossary)
         prompt = (
             "【最重要・固有名詞辞書】文字起こしの誤変換は以下を参考に必ず修正してください。\n"
@@ -898,7 +948,7 @@ def generate_minutes(
         )
         return _claude_call(prompt, temperature=0.2)
 
-    # === 二段階生成 ===
+    # === 二段階生成（バリデーション付き）===
     extraction_prompt = _safe_render_extraction(
         transcript=transcript,
         metadata=metadata_block,
@@ -907,9 +957,35 @@ def generate_minutes(
     )
     structured = _claude_call(extraction_prompt, temperature=0.3)
 
+    # Step 1 バリデーション
+    step1_ratio = len(structured) / max(len(transcript), 1)
+    logger.info(f"[Claude] Step1: {len(structured)}文字 / transcript: {len(transcript)}文字 = {step1_ratio:.1%}")
+    if step1_ratio < _STEP1_MIN_RATIO:
+        logger.warning(f"[Claude] Step1 不足。再抽出します。")
+        min_chars = int(len(transcript) * 0.8)
+        retry_prefix = (
+            f"【緊急追加指示】前回の抽出が {step1_ratio:.0%} しかありませんでした。"
+            f"最低 {min_chars} 文字で再抽出してください。\n\n"
+        )
+        structured = _claude_call(retry_prefix + extraction_prompt, temperature=0.3)
+
     formatting_prompt = _safe_render_formatting(
         template=template,
         structured=structured,
         metadata=metadata_block,
     )
-    return _claude_call(formatting_prompt, temperature=0.2)
+    minutes = _claude_call(formatting_prompt, temperature=0.2)
+
+    # Step 2 バリデーション
+    step2_ratio = len(minutes) / max(len(structured), 1)
+    logger.info(f"[Claude] Step2: {len(minutes)}文字 / Step1: {len(structured)}文字 = {step2_ratio:.1%}")
+    if step2_ratio < _STEP2_MIN_RATIO:
+        logger.warning(f"[Claude] Step2 圧縮されすぎ。再整形します。")
+        min_chars = int(len(structured) * 0.8)
+        retry_prefix = (
+            f"【緊急追加指示】前回の整形が {step2_ratio:.0%} に圧縮されました。"
+            f"最低 {min_chars} 文字で再整形してください。\n\n"
+        )
+        minutes = _claude_call(retry_prefix + formatting_prompt, temperature=0.2)
+
+    return minutes
