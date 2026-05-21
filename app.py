@@ -58,41 +58,6 @@ st.set_page_config(
 )
 
 
-# ===== パスワード認証（Render クラウド運用時） =====
-def _check_password() -> None:
-    """APP_PASSWORD 環境変数が設定されている場合のみログイン画面を表示する。"""
-    password = os.getenv("APP_PASSWORD", "").strip()
-    if not password:
-        return  # パスワード未設定（ローカル等）はスキップ
-
-    if st.session_state.get("authenticated"):
-        return  # 認証済みはスキップ
-
-    # --- ログイン画面 ---
-    st.markdown(
-        "<h2 style='text-align:center; padding-top:80px;'>📝 議事録作成システム</h2>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center; color:#aaa;'>ニッケン建設 社内専用システム</p>",
-        unsafe_allow_html=True,
-    )
-    col = st.columns([1, 1, 1])[1]
-    with col:
-        with st.form("login_form"):
-            pw = st.text_input("🔑 パスワード", type="password", label_visibility="collapsed",
-                               placeholder="パスワードを入力")
-            if st.form_submit_button("ログイン", type="primary", use_container_width=True):
-                if pw == password:
-                    st.session_state["authenticated"] = True
-                    st.rerun()
-                else:
-                    st.error("パスワードが違います")
-    st.stop()
-
-
-_check_password()
-
 
 # ===== キャッシュ関数 =====
 @st.cache_resource
