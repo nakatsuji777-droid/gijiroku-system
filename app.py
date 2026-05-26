@@ -163,19 +163,57 @@ with st.sidebar:
         st.rerun()
 
     with st.expander("詳細設定", expanded=False):
+        _GEMINI_MODELS = [
+            "models/gemini-2.5-flash",
+            "models/gemini-2.5-pro",
+            "models/gemini-2.0-flash",
+            "models/gemini-1.5-flash",
+        ]
         st.caption("音声認識エンジン")
         st.code(config.transcription_engine)
         if config.transcription_engine == "gemini":
-            st.caption("音声認識モデル")
-            st.code(config.gemini_transcription_model)
+            st.caption("🎙 音声認識モデル")
+            _tx_default_idx = (
+                _GEMINI_MODELS.index(config.gemini_transcription_model)
+                if config.gemini_transcription_model in _GEMINI_MODELS else 0
+            )
+            st.selectbox(
+                "音声認識Geminiモデル",
+                options=_GEMINI_MODELS,
+                index=_tx_default_idx,
+                format_func=lambda m: {
+                    "models/gemini-2.5-flash": "gemini-2.5-flash（推奨・無料枠OK）",
+                    "models/gemini-2.5-pro": "gemini-2.5-pro（高精度・有料枠推奨）",
+                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版安定）",
+                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量）",
+                }.get(m, m),
+                key="gemini_tx_model_select",
+                label_visibility="collapsed",
+            )
         else:
             st.caption("Whisperモデル")
             st.code(config.whisper_model_size)
         st.caption("生成エンジン")
         st.code(config.generation_engine)
         if config.generation_engine == "gemini":
-            st.caption("Geminiモデル")
-            st.code(config.gemini_model)
+            st.caption("🤖 議事録生成モデル（品質プリセットを上書き）")
+            _GEN_OPTIONS = ["（品質プリセット任せ）"] + _GEMINI_MODELS
+            st.selectbox(
+                "生成Geminiモデル",
+                options=_GEN_OPTIONS,
+                index=0,
+                format_func=lambda m: m if m.startswith("（") else {
+                    "models/gemini-2.5-flash": "gemini-2.5-flash（高速・無料枠OK）",
+                    "models/gemini-2.5-pro": "gemini-2.5-pro（最高品質・有料枠推奨）",
+                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版安定）",
+                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量）",
+                }.get(m, m),
+                key="gemini_gen_model_select",
+                label_visibility="collapsed",
+            )
+            _sel_gen = st.session_state.get("gemini_gen_model_select", "（品質プリセット任せ）")
+            if _sel_gen and not _sel_gen.startswith("（"):
+                st.warning(f"⚠️ モデル固定中: **{_sel_gen.replace('models/', '')}**")
         elif config.generation_engine == "ollama":
             st.caption("Ollamaモデル")
             st.code(config.ollama_model)
@@ -254,7 +292,9 @@ with tab_generate:
                 _tx_start = time.time()
                 _tx_engine = config.transcription_engine
                 _tx_model = (
-                    config.gemini_transcription_model
+                    st.session_state.get(
+                        "gemini_tx_model_select", config.gemini_transcription_model
+                    )
                     if _tx_engine == "gemini"
                     else f"whisper-{config.whisper_model_size}"
                 )
@@ -287,7 +327,7 @@ with tab_generate:
                             st.stop()
                         transcript = transcribe_audio_gemini(
                             temp_path,
-                            model=config.gemini_transcription_model,
+                            model=_tx_model,
                             progress_callback=update_progress,
                             speed_preset=speed_preset,
                         )
@@ -550,8 +590,10 @@ with tab_generate:
         _gen_success = False
         _gen_error = ""
         _gen_minutes_chars = 0
+        _gen_model_override = st.session_state.get("gemini_gen_model_select", "（品質プリセット任せ）")
+        _gen_model_override = None if (not _gen_model_override or _gen_model_override.startswith("（")) else _gen_model_override
         _gen_model = (
-            QUALITY_PRESETS[quality_preset]["model"]
+            (_gen_model_override or QUALITY_PRESETS[quality_preset]["model"])
             if config.generation_engine == "gemini"
             else (config.claude_model if config.generation_engine == "claude" else config.ollama_model)
         )
@@ -612,6 +654,7 @@ with tab_generate:
                     meeting_location=meeting_location,
                     attendees=attendees_note,
                     model=config.gemini_model,
+                    model_override=_gen_model_override,
                     progress_callback=_update_status,
                     quality_preset=quality_preset,
                     reference_minutes=reference_minutes_texts or None,

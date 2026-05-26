@@ -478,6 +478,7 @@ def generate_minutes_gemini(
     meeting_location: str = "",
     attendees: str = "",
     model: str = "models/gemini-2.5-flash",
+    model_override: Optional[str] = None,
     fallback_models: Optional[list] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     quality_preset: str = DEFAULT_QUALITY,
@@ -496,15 +497,13 @@ def generate_minutes_gemini(
         )
 
     preset = QUALITY_PRESETS.get(quality_preset, QUALITY_PRESETS[DEFAULT_QUALITY])
-    primary_model = preset["model"]
     temperature = preset["temperature"]
     max_tokens = preset["max_output_tokens"]
     thinking_budget = preset["thinking_budget"]
     two_stage = preset["two_stage"]
     validate_retries = preset["validate_retries"]
-
-    if model and model != "models/gemini-2.5-flash":
-        primary_model = model
+    # 優先順位: model_override（UI指定） > preset["model"] > model引数
+    primary_model = model_override or preset["model"]
 
     logger.info(
         f"=== 議事録生成開始 preset={quality_preset} model={primary_model} "
