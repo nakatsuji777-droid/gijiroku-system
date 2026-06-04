@@ -73,6 +73,14 @@ def get_templates(config_path_str: str) -> dict:
 config = get_config()
 templates = get_templates(str(config.templates_config_path))
 
+# ===== A-3: セッション開始時に古いキャッシュを自動削除（60日超） =====
+if not st.session_state.get("_cache_evicted"):
+    try:
+        get_default_cache().evict_old(max_age_days=60)
+    except Exception:
+        pass
+    st.session_state["_cache_evicted"] = True
+
 
 def has_api_key() -> bool:
     """
@@ -90,7 +98,7 @@ def has_api_key() -> bool:
 
 # ===== タイトル =====
 st.title("議事録作成システム")
-st.caption("ニッケン建設 / JC神奈川ブロック 議事録作成支援ツール")
+st.caption("ニッケン建設 議事録作成支援ツール")
 
 _engine = config.generation_engine
 if _engine == "gemini" and not os.getenv("GOOGLE_API_KEY", "").strip():
@@ -149,7 +157,7 @@ with st.sidebar:
     st.divider()
     if st.button(
         "新規作成（状態をリセット）",
-        use_container_width=True,
+        width="stretch",
         help="文字起こし・生成結果をクリアして最初からやり直します",
     ):
         for key in (
@@ -164,6 +172,8 @@ with st.sidebar:
 
     with st.expander("詳細設定", expanded=False):
         _GEMINI_MODELS = [
+            "models/gemini-3.5-flash",
+            "models/gemini-3.1-pro",
             "models/gemini-2.5-flash",
             "models/gemini-2.5-pro",
             "models/gemini-2.0-flash",
@@ -182,10 +192,12 @@ with st.sidebar:
                 options=_GEMINI_MODELS,
                 index=_tx_default_idx,
                 format_func=lambda m: {
-                    "models/gemini-2.5-flash": "gemini-2.5-flash（推奨・無料枠OK）",
-                    "models/gemini-2.5-pro": "gemini-2.5-pro（高精度・有料枠推奨）",
-                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版安定）",
-                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量）",
+                    "models/gemini-3.5-flash": "gemini-3.5-flash（推奨・最新・無料枠OK）",
+                    "models/gemini-3.1-pro":   "gemini-3.1-pro（最新高精度・有料枠推奨）",
+                    "models/gemini-2.5-flash": "gemini-2.5-flash（旧世代安定版）",
+                    "models/gemini-2.5-pro":   "gemini-2.5-pro（旧世代高性能）",
+                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版）",
+                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量旧版）",
                 }.get(m, m),
                 key="gemini_tx_model_select",
                 label_visibility="collapsed",
@@ -203,10 +215,12 @@ with st.sidebar:
                 options=_GEN_OPTIONS,
                 index=0,
                 format_func=lambda m: m if m.startswith("（") else {
-                    "models/gemini-2.5-flash": "gemini-2.5-flash（高速・無料枠OK）",
-                    "models/gemini-2.5-pro": "gemini-2.5-pro（最高品質・有料枠推奨）",
-                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版安定）",
-                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量）",
+                    "models/gemini-3.5-flash": "gemini-3.5-flash（推奨・最新・無料枠OK）",
+                    "models/gemini-3.1-pro":   "gemini-3.1-pro（最新高精度・有料枠推奨）",
+                    "models/gemini-2.5-flash": "gemini-2.5-flash（旧世代安定版）",
+                    "models/gemini-2.5-pro":   "gemini-2.5-pro（旧世代高性能）",
+                    "models/gemini-2.0-flash": "gemini-2.0-flash（旧版）",
+                    "models/gemini-1.5-flash": "gemini-1.5-flash（軽量旧版）",
                 }.get(m, m),
                 key="gemini_gen_model_select",
                 label_visibility="collapsed",
@@ -271,6 +285,11 @@ with tab_generate:
             # ===== 重複実行防止 =====
             # Streamlit は再実行が多いため、文字起こし中にもう一度クリックされると
             # クォータが二重消費されてしまう。session_state でロックする。
+            # A-2: ロックが 5 分以上解除されない場合は自動リセット（ゾンビロック対策）
+            if st.session_state.get("transcribing", False):
+                _started_at = st.session_state.get("transcribing_started_at", 0)
+                if time.time() - _started_at > 300:  # 5分でタイムアウト
+                    st.session_state["transcribing"] = False
             transcribing = st.session_state.get("transcribing", False)
             run_button_label = (
                 "⏳ 文字起こし実行中…（完了までお待ちください）"
@@ -286,6 +305,7 @@ with tab_generate:
 
             if audio_file and run_clicked and not transcribing:
                 st.session_state["transcribing"] = True
+                st.session_state["transcribing_started_at"] = time.time()  # A-2
                 temp_path = config.input_dir / audio_file.name
                 audio_bytes = audio_file.getbuffer().tobytes()
                 temp_path.write_bytes(audio_bytes)
@@ -406,6 +426,11 @@ with tab_generate:
                         )
                     except Exception:
                         pass
+                    # A-1: 一時音声ファイルを自動削除（input/ にコピーを残さない）
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         else:
             manual_text = st.text_area(
                 "文字起こしテキストを貼り付け",
@@ -510,10 +535,10 @@ with tab_generate:
         horizontal=True,
         format_func=lambda k: QUALITY_PRESETS[k]["label"],
         help=(
-            "⚡ 高速：1ステップ生成・思考なし・gemini-2.5-flash（無料枠を節約したい場合）\n\n"
+            "⚡ 高速：1ステップ生成・思考なし・gemini-3.5-flash（無料枠を節約したい場合）\n\n"
             "⚖️ バランス：**2段階生成**（① 議題抽出 → ② テンプレート整形）＋ 軽い思考＋自動再試行1回。"
             "推奨。無料枠OK。\n\n"
-            "🎯 最高品質：**gemini-2.5-pro** ＋ 深い思考＋自動再試行2回。"
+            "🎯 最高品質：**gemini-3.1-pro** ＋ 深い思考＋自動再試行2回。"
             "プロ品質。Pro モデルは無料枠が小さいため、有料枠推奨。"
         ),
         key="quality_preset_radio",
@@ -574,7 +599,7 @@ with tab_generate:
         "議事録を生成",
         type="primary",
         disabled=not can_generate,
-        use_container_width=True,
+        width="stretch",
     ):
         _engine_labels = {
             "gemini": f"Gemini（{config.gemini_model.replace('models/', '')}）",
@@ -768,7 +793,7 @@ with tab_generate:
                 st.error(
                     "**Gemini APIの無料枠（毎分5リクエスト・1日20リクエスト）を超過しました。**\n\n"
                     "▶ **1〜2分待ってから「議事録を生成」を再クリック**してください。\n"
-                    "▶ `⚖️ バランス` プリセット（gemini-2.5-flash）に切り替えると枠を節約できます。\n"
+                    "▶ `⚖️ バランス` プリセット（gemini-3.5-flash）に切り替えると枠を節約できます。\n"
                     "▶ Pro モデルは1日の無料枠が少ないため、有料APIキーの取得も検討してください。"
                 )
             elif "全モデルで失敗" in err_str:
@@ -846,7 +871,7 @@ with tab_generate:
                 mime="text/markdown"
                 if output_format == "markdown"
                 else "text/plain",
-                use_container_width=True,
+                width="stretch",
             )
         with dl_col2:
             try:
@@ -860,7 +885,7 @@ with tab_generate:
                     data=docx_bytes,
                     file_name=f"{stem}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
+                    width="stretch",
                 )
             except Exception as e:
                 st.error(f"Word変換に失敗：{e}")
@@ -877,7 +902,7 @@ with tab_generate:
                     data=xlsx_bytes,
                     file_name=f"{stem}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
+                    width="stretch",
                 )
             except Exception as e:
                 st.error(f"Excel変換に失敗：{e}")
@@ -1012,7 +1037,7 @@ with tab_archive:
                         file_name=f"minutes_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                         mime="application/zip",
                         key="archive_zip_md",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 except Exception:
                     pass
@@ -1028,7 +1053,7 @@ with tab_archive:
                         file_name=f"minutes_full_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                         mime="application/zip",
                         key="archive_zip_full",
-                        use_container_width=True,
+                        width="stretch",
                     )
                 except Exception:
                     pass
@@ -1118,7 +1143,7 @@ with tab_archive:
                             if entry_output_format == "markdown"
                             else "text/plain",
                             key=f"dl_md_{entry.filename}",
-                            use_container_width=True,
+                            width="stretch",
                         )
                     with arch_col2:
                         try:
@@ -1131,7 +1156,7 @@ with tab_archive:
                                 file_name=f"{archive_stem}.docx",
                                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                 key=f"dl_docx_{entry.filename}",
-                                use_container_width=True,
+                                width="stretch",
                             )
                         except Exception as e:
                             st.error(f"Word変換失敗：{e}")
@@ -1146,7 +1171,7 @@ with tab_archive:
                                 file_name=f"{archive_stem}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key=f"dl_xlsx_{entry.filename}",
-                                use_container_width=True,
+                                width="stretch",
                             )
                         except Exception as e:
                             st.error(f"Excel変換失敗：{e}")
@@ -1528,12 +1553,12 @@ with tab_templates:
                         file_name=b.name,
                         mime="text/markdown",
                         key=f"dl_backup_{b.name}",
-                        use_container_width=True,
+                        width="stretch",
                     )
                     if cols[2].button(
                         "↩️ 復元",
                         key=f"restore_backup_{b.name}",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         try:
                             template_path.write_text(

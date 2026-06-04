@@ -17,12 +17,6 @@
     "file": "C_他社会議.md",
     "output_format": "markdown"
   },
-  "D": {
-    "name": "JC神奈川ブロック コンプライアンス審査",
-    "description": "規則・財政審査会議（役員16名固定マスタ）",
-    "file": "D_JC神奈川ブロック.md",
-    "output_format": "plaintext"
-  },
   "E": {
     "name": "汎用議事録",
     "description": "種別を問わない一般会議（やさしい日本語）",
